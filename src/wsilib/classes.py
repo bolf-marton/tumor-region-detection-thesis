@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 import openslide
 import json
 import numpy as np
@@ -26,13 +27,16 @@ class WSI():
     properties: dict = None
 
 
-    def __init__(self, source_dir: str) -> None:
+    def __init__(self, source_dir: Path | str) -> None:
         """Initialize WSI with path and metadata.
         
         Args:
-            source_dir (str): Path to the directory containing the .mrxs file and the data folder.
+            source_dir (Path | str): Path to the directory containing the .mrxs file and the data folder.
         """ 
-        if not os.path.exists(source_dir):
+        if isinstance(source_dir, str):
+            source_dir = Path(source_dir)
+            
+        if not source_dir.exists():
             raise FileNotFoundError(f"Directory {source_dir} not found")
         
         if not os.path.isdir(source_dir):
@@ -287,11 +291,11 @@ class AnnotatedWSI:
             
             raise AnnotationError("No files found matching the annotation tags")
 
-    def extract_xml_from_dat(self, file_path:str) -> str:
+    def extract_xml_from_dat(self, file_path: Path) -> str:
         """Extracts the XML file from the given .dat file.
 
         Args:
-            file_path: Path of the .dat file.
+            file_path (Path): Path of the .dat file.
 
         Returns:
             XML file in string format.
@@ -311,16 +315,18 @@ class AnnotatedWSI:
             return wrapped_xml_content
 
     @staticmethod
-    def find_xml_start(file_path:str, tag:str) -> int:
+    def find_xml_start(file_path: Path, tag: str) -> int:
         """Searches for the tag in the file at file_path.
 
         Args:
-            file_path: Path of the .dat file.
-            tag: The name of the XML tag (without "<" and ">") indicating the beggining of the file, eg. in case of <header> -> tag = header.
+            file_path (Path): Path of the .dat file.
+            tag (str): The name of the XML tag (without "<" and ">") indicating the beggining of the file, eg. in case of <header> -> tag = header.
 
         Returns:
             Starting index of the XML formatted part in the file.
         """
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
             
         with open(file_path, 'rb') as file:
             buffer_size = 4096
@@ -546,12 +552,17 @@ class WSITileContainer:
             else:
                 tile.class_id = 0  # other
 
-    def extract_tiles(self, output_dir: Path = Path("tiles")) -> None:
+    def extract_tiles(self, output_dir: Path = None) -> None:
         """Extract tiles from the WSI at specified level. Not whole tiles (with sizes smaller than the tile size) are skipped at the ends of the image.
         
         Args:
             output_dir (Path, optional): Directory to save tiles. Defaults to Path("tiles").
         """
+        if output_dir is None:
+            output_dir = Path("tiles")
+        elif isinstance(output_dir, str):
+            output_dir = Path(output_dir)
+            
         # Create output directory
         output_dir.mkdir(exist_ok=True)
         
@@ -563,48 +574,54 @@ class WSITileContainer:
             # Read cropped region
             region = slide.read_region((0,0), self.level, level_dimensions)
             
+            total_tiles = (level_dimensions[0] // self.tile_size) * (level_dimensions[1] // self.tile_size)
+
             # Extract tiles (y for hight, x for width)
-            for x in tqdm(range(0, level_dimensions[0], self.tile_size)):
-                for y in (range(0, level_dimensions[1], self.tile_size)): 
-                    # Extract tile
-                    tile_img = region.crop((x, y, x + self.tile_size, y + self.tile_size))
-                    
-                    # Convert to array for transparency check
-                    tile_array = np.array(tile_img)
-                    
-                    # Skip fully transparent tiles
-                    if not tile_array[:,:,3].any():
-                        continue
-                    
-                    # Create tile path and save image
-                    tile_path = output_dir / f"{self.wsi.mrxs_path.stem}_l{self.level}_x{x}_y{y}.png"
-                    tile_img.save(tile_path)
-                    
-                    # Create tile metadata
-                    metadata = {
-                        'source_wsi': self.wsi.mrxs_path.stem,
-                        'level': self.level,
-                        'scale_factor': scale_factor,
-                        'coords': {
-                            'x': x,
-                            'y': y
-                        },
-                    }
-                    
-                    # Create WSITile instance
-                    wsi_tile = WSITile(
-                        level=self.level,
-                        x=x,
-                        y=y,
-                        width=self.tile_size,
-                        height=self.tile_size,
-                        image_path=tile_path,
-                        class_id=0,  # Default class, should be set based on annotations
-                        metadata=metadata
-                    )
-                    
-                    self._tiles.append(wsi_tile)
-            
+            with tqdm(total=total_tiles, desc=f"Extracting tiles from {self.wsi.mrxs_path.stem}", unit=" tiles") as pbar:
+                for x in range(0, level_dimensions[0], self.tile_size):
+                    for y in range(0, level_dimensions[1], self.tile_size): 
+                        # Extract tile
+                        tile_img = region.crop((x, y, x + self.tile_size, y + self.tile_size))
+                        
+                        # Update progress bar
+                        pbar.update(1)
+
+                        # Convert to array for transparency check
+                        tile_array = np.array(tile_img)
+                        
+                        # Skip fully transparent tiles
+                        if not tile_array[:,:,3].any():
+                            continue
+                        
+                        # Create tile path and save image
+                        tile_path = output_dir / f"{self.wsi.mrxs_path.stem}_l{self.level}_x{x}_y{y}.png"
+                        tile_img.save(tile_path)
+                        
+                        # Create tile metadata
+                        metadata = {
+                            'source_wsi': self.wsi.mrxs_path.stem,
+                            'level': self.level,
+                            'scale_factor': scale_factor,
+                            'coords': {
+                                'x': x,
+                                'y': y
+                            },
+                        }
+                        
+                        # Create WSITile instance
+                        wsi_tile = WSITile(
+                            level=self.level,
+                            x=x,
+                            y=y,
+                            width=self.tile_size,
+                            height=self.tile_size,
+                            image_path=tile_path,
+                            class_id=0,  # Default class, should be set based on annotations
+                            metadata=metadata
+                        )
+                        
+                        self._tiles.append(wsi_tile)
+                
             # Save COCO annotations if tiles were extracted
             if self._tiles:
                 self._save_coco_annotations(output_dir)
@@ -615,6 +632,9 @@ class WSITileContainer:
         Args:
             output_dir (Path): Directory where tiles are saved
         """
+        if isinstance(output_dir, str):
+            output_dir = Path(output_dir)
+            
         coco_data = {
             "info": {
                 "description": f"Tiles extracted from {self.wsi.mrxs_path.name}",
@@ -886,9 +906,8 @@ class WSITileDatabase:
         if not mrxs_files:
             raise FileNotFoundError("No .mrxs files found in directory")
         
-        # Create tile containers
-        print(f"Creating tile containers...")
-        for mrxs_file in tqdm(mrxs_files):
+        # Create tile containers for each WSI
+        for mrxs_file in tqdm(mrxs_files, desc="Creating tile containers for each WSI"):
             try:
                 wsi = WSI(str(mrxs_file.parent))
                 try:
@@ -901,9 +920,9 @@ class WSITileDatabase:
                     )
                     self.tile_containers.append(container)
                 except AnnotationError:
-                    print(f"Warning: No annotations found for {mrxs_file.name}")
+                    raise AnnotationError(f"No annotations found for {mrxs_file.name}")
             except Exception as e:
-                print(f"Error processing {mrxs_file.name}: {str(e)}")
+                raise RuntimeError(f"Error processing {mrxs_file.name}: {str(e)}")
                 
         print(f"\n[SUCCESS]: Created {len(self.tile_containers)} tile containers")
 
@@ -917,8 +936,7 @@ class WSITileDatabase:
         output_dir.mkdir(exist_ok=True)
         
         # Extract tiles from all containers
-        print("Extracting tiles...")
-        for container in tqdm(self.tile_containers):
+        for container in tqdm(self.tile_containers, desc="Extracting tiles from containers"):
             container.extract_tiles(output_dir)
             if container.annotations:
                 container._annotate_tiles()
@@ -949,7 +967,7 @@ class WSITileDatabase:
                 # Add image info
                 merged_coco["images"].append({
                     "id": image_id,
-                    "file_name": tile.image_path.name,
+                    "file_name": "images/" + tile.image_path.name,
                     "width": tile.width,
                     "height": tile.height,
                     "tile_x": tile.x,
@@ -975,7 +993,18 @@ class WSITileDatabase:
         # Save merged annotations
         with open(output_dir / "annotations.json", 'w') as f:
             json.dump(merged_coco, f, indent=2)
-            
-        print(f"\n[SUCCESS]: Dataset saved to {output_dir}")
-        print(f"Total images: {len(merged_coco['images'])}")
-        print(f"Total annotations: {len(merged_coco['annotations'])}")
+
+        # Move images to img folder
+        img_dir = output_dir / "images"
+        img_dir.mkdir(exist_ok=True)
+        for tile in container._tiles:
+            shutil.move(tile.image_path, img_dir / tile.image_path.name)
+
+        # Delete individual COCO annotation files except the merged one
+        for container in self.tile_containers:
+            coco_path = container.wsi.mrxs_path.stem + "_tiles.json"
+            coco_path = output_dir / coco_path
+            if coco_path.exists():
+                coco_path.unlink()
+
+        print(f"\n[SUCCESS]: Dataset saved to {output_dir}. Total images: {len(merged_coco['images'])}")

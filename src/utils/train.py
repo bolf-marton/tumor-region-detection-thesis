@@ -5,6 +5,7 @@ import torch.utils.data.dataloader
 from tqdm import tqdm
 import os
 from torchvision.ops import nms
+from pathlib import Path
 
 import numpy as np
 
@@ -16,7 +17,7 @@ from assets.evaluation import evaluate_retinanet, calculate_pixel_iou_binary_cla
 from assets.coco import save_predictions_in_coco_format
 
 
-def train_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer):
+def train_maskrcnn(model, device:str, data:Path, optimizer):
     """Training script for Mask R-CNN.
 
     Args:
@@ -36,7 +37,7 @@ def train_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer):
 
     model.train()  # Set model to training mode
     
-    dataloader = dataloaders.train
+    dataloader = data.train
 
     loss = 0.0
     mean_loss = 0.0
