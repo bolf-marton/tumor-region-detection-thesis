@@ -1,18 +1,18 @@
 import os
 from pathlib import Path
-import shutil
 import openslide
 import json
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
 from dataclasses import dataclass, field
-from typing import Optional, ClassVar, Dict
+from typing import Optional
 from datetime import datetime
 import xml.etree.ElementTree as ET
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from skimage.draw import polygon2mask
+
+from src.utils.pretty_print import *
 
 
 @dataclass
@@ -594,7 +594,7 @@ class WSITileContainer:
                             continue
                         
                         # Create tile path and save image
-                        tile_path = output_dir / f"{self.wsi.mrxs_path.stem}_l{self.level}_x{x}_y{y}.png"
+                        tile_path = output_dir / f"{self.wsi.mrxs_path.stem}_l{self.level}_{self.tile_size}x{self.tile_size}_x{x}_y{y}.png"
                         tile_img.save(tile_path)
                         
                         # Create tile metadata
@@ -664,7 +664,7 @@ class WSITileContainer:
                 })
         
         # Save COCO JSON
-        coco_path = output_dir / f"{self.wsi.mrxs_path.stem}_tiles.json"
+        coco_path = output_dir / f"{self.wsi.mrxs_path.stem}_l{self.level}_{self.tile_size}x{self.tile_size}_tiles.json"
         with open(coco_path, 'w') as f:
             json.dump(coco_data, f, indent=2)
 
@@ -783,14 +783,13 @@ class WSIDatabase:
         # Find all .mrxs files in directory and subdirectories
         mrxs_files = list(self.wsi_dir.glob("**/*.mrxs"))
 
-        print(f"[INFO]: Found {len(mrxs_files)} .mrxs files in {self.wsi_dir}")
+        print_info(f"Found {len(mrxs_files)} .mrxs files in {self.wsi_dir}")
         
         if not mrxs_files:
             raise FileNotFoundError("No .mrxs files found in directory")
         
         # Load each WSI with annotations
-        print(f"Loading annotations...")
-        for mrxs_file in tqdm(mrxs_files):
+        for mrxs_file in tqdm(mrxs_files, desc="Loading annotations..."):
             try:
                 wsi = WSI(str(mrxs_file.parent))
                 try:
@@ -801,7 +800,7 @@ class WSIDatabase:
             except Exception as e:
                 raise RuntimeError(f"Error loading {mrxs_file.name}: {str(e)}")
             
-        print(f"\n[SUCCESS]: Loaded {len(self.annotated_wsis)} WSIs with annotations")
+        print_success(f"Loaded {len(self.annotated_wsis)} WSIs with annotations")
 
     def save_coco_dataset(self, output_dir: Path, level: int) -> None:
         """Save all WSIs as complete images in COCO dataset format at specified level.
@@ -833,9 +832,8 @@ class WSIDatabase:
         image_id = 0
         annotation_id = 0
 
-        print(f"Processing images...")
         # Processing each AnnotatedWSI
-        for annotated_wsi in tqdm(self.annotated_wsis):
+        for annotated_wsi in tqdm(self.annotated_wsis, desc="Processing images..."):
             
             width, height = annotated_wsi.wsi.get_level_size(level)
             
@@ -843,23 +841,27 @@ class WSIDatabase:
             image_filename = f"{annotated_wsi.wsi.mrxs_path.stem}_lvl{level}.png"
             image_path = output_dir / "images" / image_filename
             
+            # Get annotations at the specified level
+            bboxes, segmentations = annotated_wsi.get_annotations_at_level(level)
+
             with openslide.OpenSlide(str(annotated_wsi.wsi.mrxs_path)) as slide:
                 image = slide.read_region((0, 0), level, (width, height))
-                image.save(image_path)
+
+            # cropping huge alpha channel regions from image
+            image, bboxes, segmentations = self.alpha_crop(image, bboxes, segmentations)
+
+            image.save(image_path)
             
             # Image entry in COCO annotation file
             dataset["images"].append({
                 "id": image_id,
                 "file_name": f"images/{image_filename}",
-                "width": width,
-                "height": height,
+                "width": image.size[0],
+                "height": image.size[1],
                 "level": level,
                 "wsi_source": annotated_wsi.wsi.mrxs_path.name
             })
-            
-            # Get annotations at the specified level
-            bboxes, segmentations = annotated_wsi.get_annotations_at_level(level)
-            
+
             # Add annotations
             for bbox, segmentation in zip(bboxes, segmentations):
                 x, y, w, h = bbox
@@ -880,7 +882,107 @@ class WSIDatabase:
         with open(output_dir / "annotations.json", 'w') as f:
             json.dump(dataset, f, indent=2)
         
-        print(f"\n[SUCCESS]: Dataset saved to {output_dir}. Number of images: {len(dataset['images'])}")
+        print_success(f"Dataset saved to {output_dir}. Number of images: {len(dataset['images'])}")
+
+    @staticmethod
+    def alpha_crop(image: Image, bboxes: list, segmentations: list) -> tuple:
+        """
+        Crop the image to the non-transparent area, remove the alpha channel,
+        and adjust bounding boxes and segmentation polygons accordingly.
+        
+        Args:
+            image (Image): Input image with alpha channel. Shape [H, W, 4].
+            bboxes (list): List of bounding boxes in float32 pixel coordinates [(x_min, y_min, width, height), ...].
+            segmentations (list): List of segmentation points in float32 pixel coordinates [[x1, y1 x2, y2, ...], [...], ...].
+
+        Returns:
+            tuple: A tuple containing the cropped RGB (PIL) image and adjusted bounding boxes and segmentation polygons.
+        """
+        # Convert PIL Image to numpy array if needed
+        if isinstance(image, Image.Image):
+            if image.mode != 'RGBA':
+                raise ValueError("PIL Image must be in RGBA mode")
+            image = np.array(image)
+
+        if image.dtype != np.uint8:
+            raise ValueError("Image must be either PIL Image or numpy array (of dtype uint8).")
+    
+        if image.shape[2] != 4:
+            raise ValueError("Input image must have an alpha channel (4 channels).")
+        
+        alpha_channel = image[:, :, 3]
+        y_indices, x_indices = np.where(alpha_channel != 0)
+        
+        if len(x_indices) == 0 or len(y_indices) == 0:
+            # No non-transparent pixels, return original image and bboxes
+            return image[:, :, :3], bboxes
+
+        # Calculate crop coordinates
+        x_min_crop, y_min_crop = np.min(x_indices), np.min(y_indices)
+        x_max_crop, y_max_crop = np.max(x_indices), np.max(y_indices)
+        
+        # Crop the image and remove the alpha channel
+        cropped_image = image[y_min_crop:y_max_crop+1, x_min_crop:x_max_crop+1, :3]
+
+        # Mask for remaining transparent regions
+        cropped_alpha = alpha_channel[y_min_crop:y_max_crop+1, x_min_crop:x_max_crop+1]
+        transparent_mask = cropped_alpha == 0
+
+        # Replace transparent pixels with white in the cropped image
+        cropped_image = cropped_image.copy()
+        cropped_image[transparent_mask] = 255
+        
+        # Get new dimensions
+        cropped_height, cropped_width = cropped_image.shape[0], cropped_image.shape[1]
+        
+        # Adjust bounding boxes
+        adjusted_bboxes = []
+        for bbox in bboxes:
+
+            # Converting from COCO to Pascal Voc format
+            x_min = bbox[0]
+            y_min = bbox[1]
+            x_max = x_min + bbox[2]
+            y_max = y_min + bbox[3]
+            
+            # Adjust by crop offsets
+            x_min -= x_min_crop
+            x_max -= x_min_crop
+            y_min -= y_min_crop
+            y_max -= y_min_crop
+            
+            # Clip the bounding box to the bounds of the cropped image
+            x_min = np.clip(x_min, 0, cropped_width - 1)
+            x_max = np.clip(x_max, 0, cropped_width - 1)
+            y_min = np.clip(y_min, 0, cropped_height - 1)
+            y_max = np.clip(y_max, 0, cropped_height - 1)
+            
+            # Only include bounding boxes that are within the cropped image
+            if x_min < x_max and y_min < y_max:
+                adjusted_bboxes.append([x_min, y_min, x_max-x_min, y_max-y_min])
+
+        # Adjust segmentation polygons
+        adjusted_segmentations = []
+        for segmentation in segmentations:
+            adjusted = []
+            for i in range(0, len(segmentation), 2):
+                # Adjust by crop offsets
+                x_new = segmentation[i] - x_min_crop
+                y_new = segmentation[i+1] - y_min_crop
+                
+                # Clip the points to the bounds of the cropped image
+                x_new = np.clip(x_new, 0, cropped_width - 1)
+                y_new = np.clip(y_new, 0, cropped_height - 1)
+                
+                adjusted.append(x_new)
+                adjusted.append(y_new)
+
+            adjusted_segmentations.append(adjusted)
+
+        # Converting to PIL Image
+        cropped_image = Image.fromarray(np.uint8(cropped_image))
+
+        return cropped_image, adjusted_bboxes, adjusted_segmentations
 
 @dataclass
 class WSITileDatabase:
@@ -901,7 +1003,7 @@ class WSITileDatabase:
         
         # Find all .mrxs files
         mrxs_files = list(self.wsi_dir.glob("**/*.mrxs"))
-        print(f"[INFO]: Found {len(mrxs_files)} .mrxs files in {self.wsi_dir}")
+        print_info(f"Found {len(mrxs_files)} .mrxs files in {self.wsi_dir}")
         
         if not mrxs_files:
             raise FileNotFoundError("No .mrxs files found in directory")
@@ -924,7 +1026,7 @@ class WSITileDatabase:
             except Exception as e:
                 raise RuntimeError(f"Error processing {mrxs_file.name}: {str(e)}")
                 
-        print(f"\n[SUCCESS]: Created {len(self.tile_containers)} tile containers")
+        print_success(f"Created {len(self.tile_containers)} tile containers")
 
     def save_dataset(self, output_dir: Path) -> None:
         """Save all tiles and merge annotations into a single COCO dataset.
@@ -937,12 +1039,12 @@ class WSITileDatabase:
         
         # Extract tiles from all containers
         for container in tqdm(self.tile_containers, desc="Extracting tiles from containers"):
-            container.extract_tiles(output_dir)
+            container.extract_tiles(output_dir / "images")
             if container.annotations:
                 container._annotate_tiles()
 
         # Merge all annotation files
-        print("\nMerging annotations...")
+        print("Merging annotations...")
         merged_coco = {
             "info": {
                 "year": datetime.now().year,
@@ -991,20 +1093,14 @@ class WSITileDatabase:
                 image_id += 1
         
         # Save merged annotations
-        with open(output_dir / "annotations.json", 'w') as f:
+        with open(output_dir / f"l{self.level}_{self.tile_size}x{self.tile_size}_tiles", 'w') as f:
             json.dump(merged_coco, f, indent=2)
-
-        # Move images to img folder
-        img_dir = output_dir / "images"
-        img_dir.mkdir(exist_ok=True)
-        for tile in container._tiles:
-            shutil.move(tile.image_path, img_dir / tile.image_path.name)
 
         # Delete individual COCO annotation files except the merged one
         for container in self.tile_containers:
-            coco_path = container.wsi.mrxs_path.stem + "_tiles.json"
-            coco_path = output_dir / coco_path
+            coco_file = f"{container.wsi.mrxs_path.stem}_l{container.level}_{container.tile_size}x{container.tile_size}_tiles.json"
+            coco_path = output_dir / "images" / coco_file
             if coco_path.exists():
                 coco_path.unlink()
 
-        print(f"\n[SUCCESS]: Dataset saved to {output_dir}. Total images: {len(merged_coco['images'])}")
+        print_success(f"Dataset saved to {output_dir}. Total images: {len(merged_coco['images'])}")

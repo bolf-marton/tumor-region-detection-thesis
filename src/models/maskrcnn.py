@@ -24,10 +24,10 @@ def get_model_maskrcnn(num_classes, **kwargs):
     torch.nn.init.constant_(dummy_model.roi_heads.mask_predictor.mask_fcn_logits.bias, 0.0)
     
     # Save the modified state dict
-    torch.save(dummy_model.state_dict(), "models/MaskRCNN_ResNet50_FPN_V2_Weights.pth")
+    torch.save(dummy_model.state_dict(), "src/models/MaskRCNN_ResNet50_FPN_V2_Weights.pth")
 
     # Load the model with the saved state dict but without loading the unnecessary weights strictly
     model = maskrcnn_resnet50_fpn_v2(num_classes=num_classes, **kwargs)
-    model.load_state_dict(torch.load("models/MaskRCNN_ResNet50_FPN_V2_Weights.pth"), strict=False)
+    model.load_state_dict(torch.load("src/models/MaskRCNN_ResNet50_FPN_V2_Weights.pth"), strict=False)
     
     return model

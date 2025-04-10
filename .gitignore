@@ -1,6 +1,7 @@
 # Additional files and folder
 data/
 *.pth 
+src/utils/comet.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
