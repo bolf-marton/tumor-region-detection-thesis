@@ -1,29 +1,78 @@
 import torch
 import torch.utils
 import torch.utils.data
-import torch.utils.data.dataloader
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-import os
-from torchvision.ops import nms
 from pathlib import Path
+from typing import Any
 
-import numpy as np
+from src.utils.comet import CometLogger
+from src.utils.image_tools import get_image
+from src.utils.metrics import calculate_pixel_iou_binary_classification
 
-from assets.dataset import get_image
+def maskrcnn_training_testing_loop(model:Any, device:str, train_dataloader:torch.utils.data.DataLoader, optimizer:Any, scheduler:Any, n_epochs:int=0, box_score_thresh:float=0.5, comet_logger:CometLogger=None):
+    """Training loop for Mask R-CNN.
+    Args:
+        model (Any): pytorch NN model.
+        device (str): "cuda" / "cpu".
+        train_dataloader (torch.utils.data.dataloader.DataLoader): Dataloader for training.
+        optimizer (Any): the desired optimizer.
+        scheduler (Any): the desired scheduler.
+        n_epochs (int): number of epochs to train.
+        box_score_thresh (float): confidence score threshold for bounding box predictions.
+        comet_logger (CometLogger): Comet.ml logger (optional).
+    Returns:
+        model: trained model.
+        metrics: { 
+                "test_loss" : float,
+                "iou": float,
+                "dice": float
+                }
+    """
+    if n_epochs != 0:
+            print("\n🚀 STARTING TRAINING")
 
-from fastai.vision.data import DataLoaders
+            for epoch in range(n_epochs):
+                if comet_logger is not None:
+                    print("-" * len(f"Epoch {epoch+1}/{n_epochs} - {comet_logger.name}"))
+                    print(f"Epoch {epoch+1}/{n_epochs} - {comet_logger.name}")
+                    print("-" * len(f"Epoch {epoch+1}/{n_epochs} - {comet_logger.name}"))
+                else:
+                    print("-" * len(f"Epoch {epoch+1}/{n_epochs}"))
+                    print(f"Epoch {epoch+1}/{n_epochs}")
+                    print("-" * len(f"Epoch {epoch+1}/{n_epochs}"))
 
-from assets.evaluation import evaluate_retinanet, calculate_pixel_iou_binary_classification, calculate_pixel_dice_binary_classification
-from assets.coco import save_predictions_in_coco_format
+                # TRAINING
+                model, train_metrics = train_maskrcnn(model,device,train_dataloader,optimizer)
+                
+                # Log metrics to Comet.ml
+                if comet_logger is not None:
+                    for k in train_metrics.keys():
+                        comet_logger.log_metric(k, train_metrics[k], epoch=epoch + 1)
 
 
-def train_maskrcnn(model, device:str, data:Path, optimizer):
+                # TESTING
+                test_metrics = test_maskrcnn(model,device,train_dataloader,optimizer,box_score_thresh)
+
+                # Log metrics to Comet.ml
+                if comet_logger is not None:
+                    for k in test_metrics.keys():
+                        comet_logger.log_metric(k, test_metrics[k], epoch=epoch + 1)
+
+                # SCHEDULER
+                if scheduler is not None:
+                    scheduler.step(test_metrics["iou"])
+                # Log learning rate to Comet.ml
+                if comet_logger is not None:
+                    comet_logger.log_metric("learning_rate", scheduler.get_last_lr(), epoch=epoch + 1)
+
+def train_maskrcnn(model, device:str, dataloader: torch.utils.data.DataLoader, optimizer):
     """Training script for Mask R-CNN.
 
     Args:
         model: pytorch NN model.
         device: "cuda" / "cpu".
-        dataloaders: fastai DataLoaders.
+        dataloader: DataLoader for training.
         optimizer: the desired optimizer.
 
     Returns:
@@ -36,18 +85,16 @@ def train_maskrcnn(model, device:str, data:Path, optimizer):
     model = model.to(device)
 
     model.train()  # Set model to training mode
-    
-    dataloader = data.train
 
     loss = 0.0
     mean_loss = 0.0
 
     # Iterate over the data
-    for image, targets in tqdm(dataloader):
+    for images, targets in tqdm(dataloader):
         
         # preprocessing and converting to tensors
-        image = [torch.tensor(get_image(image[0])).squeeze().permute(2,0,1).to(device)]
-        targets = [{key: targets[0][key].squeeze(0).to(device) for key in targets[0].keys()}]
+        images = [images[0].to(device)]
+        targets = [{key: targets[key].squeeze(0).to(device) for key in targets.keys()}]
 
         # Zero the variables that are used for storing the gradients
         optimizer.zero_grad(set_to_none=True)
@@ -55,7 +102,7 @@ def train_maskrcnn(model, device:str, data:Path, optimizer):
         # Forward
         with torch.set_grad_enabled(True):
 
-            loss_dict = model(image, targets)
+            loss_dict = model(images, targets)
             """
             {
             'loss_classifier': tensor(0.7220, device='cuda:0', grad_fn=<NllLossBackward0>), 
@@ -82,15 +129,15 @@ def train_maskrcnn(model, device:str, data:Path, optimizer):
                 
     return model, metrics
 
-def test_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer, confidence_threshold: float=0.5):
+def test_maskrcnn(model:Any, device:str, dataloader:torch.utils.data.DataLoader, optimizer:Any, confidence_threshold: float=0.5):
     """Runs testing for the model.
 
     Args:
-        model: pytorch NN model.
-        device: "cuda" / "cpu".
-        dataloaders: fastai DataLoaders.
-        optimizer: the desired optimizer.
-        confidence_threshold: confidence score threshold to filter predictions during evaluation.
+        model (Any): pytorch NN model.
+        device (str): "cuda" / "cpu".
+        dataloader (torch.utils.data.DataLoader): DataLoader for testing.
+        optimizer (Any): the desired optimizer.
+        confidence_threshold (float): confidence score threshold to filter predictions during evaluation.
 
     Returns:
         metrics: { 
@@ -103,25 +150,19 @@ def test_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer, confide
     # Sending model to device
     model = model.to(device)
 
-    # for validation
-    #mAP = MeanAveragePrecision(box_format='xyxy',iou_type='bbox')
-
-    dataloader = dataloaders.valid
-
     metrics = { 
         "test_loss" : 0.0,
         "iou": 0.0,
-        "dice" : 0.0
         }
 
     loss = 0.0
 
     # Iterate over the data
-    for image, targets in tqdm(dataloader):
+    for images, targets in tqdm(dataloader):
 
         # preprocessing and converting to tensors
-        image = [torch.tensor(get_image(image[0])).squeeze().permute(2,0,1).to(device)]
-        targets = [{key: targets[0][key].squeeze(0).to(device) for key in targets[0].keys()}]
+        images = [images[0].to(device)]
+        targets = [{key: targets[key].squeeze(0).to(device) for key in targets.keys()}]
         
         # Zero the variables that are used for storing the gradients
         optimizer.zero_grad(set_to_none=True)
@@ -130,7 +171,7 @@ def test_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer, confide
             # To get training loss
             model.train()  # Set model to training mode
 
-            loss_dict = model(image, targets)
+            loss_dict = model(images, targets)
             """{
             'loss_classifier': tensor(0.7220, device='cuda:0', grad_fn=<NllLossBackward0>), 
             'loss_box_reg': tensor(0.1060, device='cuda:0', grad_fn=<DivBackward0>), 
@@ -144,7 +185,7 @@ def test_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer, confide
 
             # For other metrics
             model.eval()  # Set model to evaluate mode
-            predictions = model(image)
+            predictions = model(images)
 
             """
             PREDICTION DICT:
@@ -159,15 +200,15 @@ def test_maskrcnn(model, device:str, dataloaders:DataLoaders, optimizer, confide
             
             for prediction, target in zip(predictions, targets):
                 # Metrics calculation
-                iou = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold)
-                dice = calculate_pixel_dice_binary_classification(prediction, target, confidence_threshold)
-                metrics["iou"]+=iou
-                metrics["dice"]+=dice
+                #iou_best = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold,method="best")
+                iou_combined = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold,method="combined")
+                metrics["iou"]+=iou_combined
+                #metrics["iou_best"]+=iou_best
 
     
     for k in metrics.keys():
         metrics[k] = metrics[k] / len(dataloader.dataset)
 
-    print(f"Test – IoU: {metrics['iou']:.4f}, Dice: {metrics['dice']:.4f}")
+    print(f"Test – IoU: {metrics['iou']:.4f}, Loss: {metrics['test_loss']:.4f}")
                     
     return metrics
