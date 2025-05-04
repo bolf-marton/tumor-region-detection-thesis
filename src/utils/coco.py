@@ -22,6 +22,7 @@ class COCODataset(Dataset):
         train_ratio: float = 0.8,
         transform: Optional[Callable] = None,
         random_seed: int = 42,
+        bbox_format: str = "coco"
     ) -> None:
         """Initialize dataset.
         
@@ -31,6 +32,9 @@ class COCODataset(Dataset):
             train_ratio: Ratio of images to use for training (default: 0.8)
             transform: Optional transform to be applied
             random_seed: Random seed for reproducible splits
+            bbox_format: Format of bounding boxes (default: "coco"). Available formats:
+                - "coco": [x, y, w, h]
+                - "pascal_voc": [x1, y1, x2, y2]
         """
 
         self.annotation_file = Path(annotation_file)
@@ -38,6 +42,7 @@ class COCODataset(Dataset):
         self.train_ratio = train_ratio
         self.transform = transform
         self.random_seed = random_seed
+        self.bbox_format = bbox_format
         
         self.coco = COCO(annotation_file)
         
@@ -98,37 +103,56 @@ class COCODataset(Dataset):
         
         for ann in annotations:
             # Get bbox
-            x, y, w, h = ann['bbox']
-            boxes.append([x, y, x + w, y + h])
-            
+            if "bbox" in ann.keys() and ann["bbox"]:
+                x, y, w, h = ann['bbox']
+
+                # Convert to apropriate format (is in COCO format by default)
+                if self.bbox_format == "coco":
+                    boxes.append([x, y, w, h])
+                elif self.bbox_format == "pascal_voc":
+                    # Pascal VOC format: [x1, y1, x2, y2]
+                    boxes.append([x, y, x + w, y + h])
+                else:
+                    raise ValueError(f"Unknown bbox format: {self.bbox_format}. Use 'coco' or 'pascal_voc'.")
+
             # Get label
             labels.append(ann['category_id'])
             
             # Get mask
-            mask = self.coco.annToMask(ann)
-            masks.append(mask)
+            if "segmentation" in ann.keys() and ann["segmentation"]:
+                mask = self.coco.annToMask(ann)
+                masks.append(mask)
         
         # Convert to tensors
         # "bboxes" and "boxes" are both present because of a KeyError in the model's code
         # When only using one, the model throws a KeyError trying to access the other 
         target = {
-            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
-            "bboxes": torch.as_tensor(boxes, dtype=torch.float32),
-            "labels": torch.as_tensor(labels, dtype=torch.int64),
-            "masks": torch.as_tensor(masks, dtype=torch.uint8)
+            "labels": torch.as_tensor(labels, dtype=torch.int64) if labels else torch.zeros(0, dtype=torch.int64),
+            "boxes": torch.zeros((0, 4), dtype=torch.float32),
+            "bboxes": torch.zeros((0, 4), dtype=torch.float32),
+            "masks": torch.zeros((0, image.height, image.width), dtype=torch.uint8)
         }
+
+        if len(boxes) > 0:
+            target["boxes"] = torch.as_tensor(boxes, dtype=torch.float32)
+            target["bboxes"] = torch.as_tensor(boxes, dtype=torch.float32)
+
+        if len(masks) > 0:
+            target["masks"] = torch.as_tensor(masks, dtype=torch.uint8)
+
         
         # Apply transforms if any
         if self.transform is not None:
-            transformed = self.transform(image=np.array(image), 
-                                      masks=masks,
-                                      boxes=boxes,
-                                      labels=labels)
-            image = transformed["image"]
+            transformed = self.transform(image=np.array(image),
+                                      masks=np.array(masks),
+                                      bboxes=np.array(boxes),
+                                      class_labels=labels)
+            
+            image = transformed["image"].to(torch.float32)
             target["masks"] = torch.as_tensor(transformed["masks"], dtype=torch.uint8)
-            target["boxes"] = torch.as_tensor(transformed["boxes"], dtype=torch.float32)
-            target["bboxes"] = torch.as_tensor(transformed["boxes"], dtype=torch.float32)
-            target["labels"] = torch.as_tensor(transformed["labels"], dtype=torch.int64)
+            target["boxes"] = torch.as_tensor(transformed["bboxes"], dtype=torch.float32)
+            target["bboxes"] = torch.as_tensor(transformed["bboxes"], dtype=torch.float32)
+
         else:
             image = torch.as_tensor(np.array(image), dtype=torch.float32).permute(2, 0, 1)
         

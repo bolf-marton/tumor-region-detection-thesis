@@ -31,3 +31,39 @@ def get_model_maskrcnn(num_classes, **kwargs):
     model.load_state_dict(torch.load("src/models/MaskRCNN_ResNet50_FPN_V2_Weights.pth"), strict=False)
     
     return model
+
+def replace_batch_norm_with_group_norm(module, num_groups=32):
+    """
+    Recursively replaces all BatchNorm layers with GroupNorm layers
+    """
+    module_output = module
+    if isinstance(module, torch.nn.BatchNorm2d):
+        # Replace BatchNorm with GroupNorm (preserving affine parameters if present)
+        module_output = torch.nn.GroupNorm(
+            num_groups=num_groups,
+            num_channels=module.num_features,
+            eps=module.eps,
+            affine=module.affine
+        )
+        
+        if module.affine:
+            # Copy the learnable affine parameters from BatchNorm
+            module_output.weight.data = module.weight.data.clone().detach()
+            module_output.bias.data = module.bias.data.clone().detach()
+    
+    for name, child in module.named_children():
+        module_output.add_module(
+            name, replace_batch_norm_with_group_norm(child, num_groups)
+        )
+    
+    return module_output
+
+# Modify your get_model_maskrcnn function to use GroupNorm
+def get_model_maskrcnn_with_groupnorm(num_classes=2, **kwargs):
+    # Get the standard MaskRCNN model
+    model = get_model_maskrcnn(num_classes=num_classes, **kwargs)
+    
+    # Replace all BatchNorm layers with GroupNorm
+    model = replace_batch_norm_with_group_norm(model)
+    
+    return model

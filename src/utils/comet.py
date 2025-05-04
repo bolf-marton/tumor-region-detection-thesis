@@ -87,10 +87,11 @@ class CometLogger(comet_ml.Experiment):
 
     def upload_images(self, 
                       model, 
-                      device:str, 
-                      dataloader: torch.utils.data.DataLoader, 
-                      confidence_thr: float, 
-                      entry_name: str, 
+                      model_type: str="maskrcnn",
+                      device:str="cuda", 
+                      dataloader: torch.utils.data.DataLoader=None, 
+                      confidence_thr: float=0.5, 
+                      entry_name: str="sample_image", 
                       overwrite: bool=True, 
                       indices: list=[],
                       ) -> None:
@@ -98,6 +99,7 @@ class CometLogger(comet_ml.Experiment):
 
         Args:
             model (_type_): variable containing the trained model.
+            model_type (str): type of the model. Supported: "unet", "maskrcnn".
             device (str): device name.
             dataset (torch.utils.data.DataLoader): DataLoader for images.
             confidence_thr (float): predictions having equal or higher confidence score will be accepted and visualized.
@@ -119,18 +121,18 @@ class CometLogger(comet_ml.Experiment):
 
         # Preparing images
         imgs=[]
-
+        
         dataset = dataloader.dataset
-
         for i in indices:
             img = dataset[i][0]
             img = img.squeeze().to(device)
             imgs.append(img)
-
+            
         imgs = [img.to(torch.float32) for img in imgs]
         
         # Prediction
-        preds = model(imgs)
+        with torch.no_grad():
+            preds = model(imgs)
 
         # Filtering predictions based on confidence threshold
         for p, pred in enumerate(preds):
