@@ -33,16 +33,37 @@ class DoubleConv(nn.Module):
         return self.conv(x)
 
 
+class DoubleConvWithGroupNorm(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConvWithGroupNorm, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),
+            nn.GroupNorm(num_groups=8, num_channels=out_channels),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1, bias=False),
+            nn.GroupNorm(num_groups=8, num_channels=out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+    
+
 class UNet(nn.Module):
-    def __init__(self, in_channels=3,  out_channels=1, features=[64, 128, 256, 512]):
+    def __init__(self, in_channels=3,  out_channels=1, features=[64, 128, 256, 512], use_group_norm=False):
         super(UNet, self).__init__()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        ConvBlock = DoubleConvWithGroupNorm if use_group_norm else DoubleConv
+
+
         # 161 x  161, 80x80
         # Down part
         for feature in features:
-            self.downs.append(DoubleConv(in_channels, feature))
+            self.downs.append(ConvBlock(in_channels, feature))
             in_channels = feature
         # up part
         for feature in reversed(features):
@@ -51,11 +72,12 @@ class UNet(nn.Module):
                     feature * 2, feature, kernel_size=2, stride=2
                 )
             )
-            self.ups.append(DoubleConv(feature*2, feature))
+            self.ups.append(ConvBlock(feature*2, feature))
 
-        self.bottleneck = DoubleConv(features[-1], features[-1]*2)
+        self.bottleneck = ConvBlock(features[-1], features[-1]*2)
 
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
 
 
     def forward(self, x):
@@ -76,15 +98,18 @@ class UNet(nn.Module):
 
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = self.ups[idx+1](concat_skip)
-        return self.final_conv(x)
 
-def get_model_unet(in_channels=3, out_channels=1, features=[64, 128, 256, 512], **kwargs):
+        # Sigmoid for binary segmentation
+        return self.sigmoid(self.final_conv(x))
+
+def get_model_unet(in_channels=3, out_channels=1, features=[64, 128, 256, 512], use_group_norm=False, **kwargs):
     """Create and return a UNet model instance.
     
     Args:
         in_channels (int): Number of input channels
         out_channels (int): Number of output channels
         features (list): List of feature dimensions for each level
+        use_group_norm (bool): Whether to use Group Normalization instead of Batch Normalization
         **kwargs: Additional arguments to pass to the UNet constructor
     
     Returns:
@@ -94,6 +119,7 @@ def get_model_unet(in_channels=3, out_channels=1, features=[64, 128, 256, 512], 
         in_channels=in_channels,
         out_channels=out_channels,
         features=features,
+        use_group_norm=use_group_norm,
         **kwargs
     )
     return model

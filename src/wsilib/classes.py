@@ -1093,7 +1093,7 @@ class WSITileDatabase:
                 image_id += 1
         
         # Save merged annotations
-        with open(output_dir / f"l{self.level}_{self.tile_size}x{self.tile_size}_tiles", 'w') as f:
+        with open(output_dir / f"l{self.level}_{self.tile_size}x{self.tile_size}_tiles.json", 'w') as f:
             json.dump(merged_coco, f, indent=2)
 
         # Delete individual COCO annotation files except the merged one
