@@ -22,7 +22,8 @@ class COCODataset(Dataset):
         train_ratio: float = 0.8,
         transform: Optional[Callable] = None,
         random_seed: int = 42,
-        bbox_format: str = "coco"
+        bbox_format: str = "coco",
+        split_file: Optional[Path | str] = None
     ) -> None:
         """Initialize dataset.
         
@@ -35,6 +36,8 @@ class COCODataset(Dataset):
             bbox_format: Format of bounding boxes (default: "coco"). Available formats:
                 - "coco": [x, y, w, h]
                 - "pascal_voc": [x1, y1, x2, y2]
+            split_file: Optional path to a JSON file containing predefined train/test splits.
+                        If provided, train_ratio is ignored.
         """
 
         self.annotation_file = Path(annotation_file)
@@ -43,26 +46,93 @@ class COCODataset(Dataset):
         self.transform = transform
         self.random_seed = random_seed
         self.bbox_format = bbox_format
+        self.split_file = split_file
         
         self.coco = COCO(annotation_file)
         
         all_image_ids = list(sorted(self.coco.imgs.keys()))
         
-        train_ids, test_ids = train_test_split(
-            all_image_ids,
-            train_size=train_ratio,
-            random_state=random_seed,
-            shuffle=True
-        )
-        
-        # Select appropriate images
-        self.image_ids = train_ids if train else test_ids
+        # If split file is provided, use it for train/test split
+        if split_file is not None:
+            self._split_from_file(all_image_ids)
+        else:
+            # Otherwise random split
+            train_ids, test_ids = train_test_split(
+                all_image_ids,
+                train_size=train_ratio,
+                random_state=random_seed,
+                shuffle=True
+            )
+            
+            # Select appropriate images
+            self.image_ids = train_ids if train else test_ids
         
         # Category mapping
         self.categories = {cat['id']: cat['name'] 
                          for cat in self.coco.loadCats(self.coco.getCatIds())}
         
         print_success(f"Loaded {'training' if train else 'test'} set with {len(self.image_ids)} images\n")
+
+    def _split_from_file(self, all_image_ids: List[int]) -> None:
+        """Load predefined train/test split from a JSON file.
+        
+        Args:
+            all_image_ids: List of all image IDs in the dataset
+        """
+        try:
+            with open(self.split_file, 'r') as f:
+                split_data = json.load(f)
+                
+            if "train_set" not in split_data or "test_set" not in split_data:
+                raise ValueError(f"Split file must contain 'train_set' and 'test_set' keys")
+                
+            # Get image names to use for filtering
+            train_filenames = set(split_data["train_set"])
+            test_filenames = set(split_data["test_set"])
+            
+            # Filter image IDs of the COCO dataset based on the source filename in the split file
+            train_ids = []
+            test_ids = []
+            
+            for image_id in all_image_ids:
+                img_info = self.coco.loadImgs(image_id)[0]
+                wsi_source = img_info.get("wsi_source", "")
+                
+                # Remove extension
+                if wsi_source.endswith(".mrxs"):
+                    wsi_source = wsi_source[:-5]
+                
+                # Check which set this image belongs to
+                if wsi_source in train_filenames:
+                    train_ids.append(image_id)
+                elif wsi_source in test_filenames:
+                    test_ids.append(image_id)
+            
+            self.image_ids = train_ids if self.train else test_ids
+            
+            # Checks
+            if len(train_ids) == 0 and self.train:
+                raise ValueError("No training images found with the given split file")
+            if len(test_ids) == 0 and not self.train:
+                raise ValueError("No test images found with the given split file")
+                
+            print_success(f"Loaded split from {self.split_file}")
+            print_success(f"Found {len(train_ids)} training images and {len(test_ids)} test images")
+            
+        except Exception as e:
+            print_error(f"Error loading split file: {e}")
+            print_warning("Falling back to random split")
+            
+            # Fallback to random split
+            train_ids, test_ids = train_test_split(
+                all_image_ids,
+                train_size=self.train_ratio,
+                random_state=self.random_seed,
+                shuffle=True
+            )
+            
+            # Select appropriate images
+            self.image_ids = train_ids if self.train else test_ids
 
     def __getitem__(self, idx: int) -> Dict:
         """Get one image from the dataset.
