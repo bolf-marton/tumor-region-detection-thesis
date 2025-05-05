@@ -384,6 +384,9 @@ def test_unet(model: Any, device: str, dataloader: torch.utils.data.DataLoader, 
             (image.shape[0], 1, target_masks.shape[1], target_masks.shape[2]),  # Shape: [B, 1, H, W]
             device=device
         )
+
+        # Zero the variables that are used for storing the gradients
+        optimizer.zero_grad(set_to_none=True)
         
         # Combine instance masks into one binary mask
         if target_masks.shape[0] > 0:  # If we have any masks

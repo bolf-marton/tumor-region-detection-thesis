@@ -669,7 +669,7 @@ class WSITileContainer:
             json.dump(coco_data, f, indent=2)
 
     def visualize(self, figsize: tuple = (20, 20), alpha: float = 0.3,
-                 color: str = 'red', show_stats: bool = True) -> None:
+                 color: str = 'red', show_stats: bool = False) -> None:
         """Visualize WSI with tile overlay.
         
         Args:
