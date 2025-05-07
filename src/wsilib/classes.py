@@ -848,7 +848,7 @@ class WSIDatabase:
                 image = slide.read_region((0, 0), level, (width, height))
 
             # cropping huge alpha channel regions from image
-            image, bboxes, segmentations = self.alpha_crop(image, bboxes, segmentations)
+            image, bboxes, segmentations, crop_offsets = self.alpha_crop(image, bboxes, segmentations)
 
             image.save(image_path)
             
@@ -859,7 +859,8 @@ class WSIDatabase:
                 "width": image.size[0],
                 "height": image.size[1],
                 "level": level,
-                "wsi_source": annotated_wsi.wsi.mrxs_path.name
+                "wsi_source": annotated_wsi.wsi.mrxs_path.name,
+                "crop_offsets": crop_offsets
             })
 
             # Add annotations
@@ -896,7 +897,7 @@ class WSIDatabase:
             segmentations (list): List of segmentation points in float32 pixel coordinates [[x1, y1 x2, y2, ...], [...], ...].
 
         Returns:
-            tuple: A tuple containing the cropped RGB (PIL) image and adjusted bounding boxes and segmentation polygons.
+            tuple: A tuple containing the cropped RGB (PIL) image and adjusted bounding boxes and segmentation polygons along with the offset values coming from the crop.
         """
         # Convert PIL Image to numpy array if needed
         if isinstance(image, Image.Image):
@@ -982,7 +983,7 @@ class WSIDatabase:
         # Converting to PIL Image
         cropped_image = Image.fromarray(np.uint8(cropped_image))
 
-        return cropped_image, adjusted_bboxes, adjusted_segmentations
+        return cropped_image, adjusted_bboxes, adjusted_segmentations, (int(x_min_crop), int(y_min_crop), int(x_max_crop), int(y_max_crop))
 
 @dataclass
 class WSITileDatabase:

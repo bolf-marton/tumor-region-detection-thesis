@@ -5,11 +5,12 @@ from tqdm import tqdm
 from pathlib import Path
 from PIL import Image
 from typing import Dict, List, Any, Union
+import cv2
 
 from src.utils.image_tools import get_image
 from src.utils.metrics import calculate_pixel_iou_binary_classification
 from src.utils.coco import COCODataset
-from src.wsilib import WSITileContainer, WSITile, WSI
+from src.wsilib import WSITileContainer, WSITile, WSI, WSIDatabase
 
 # RESNET
 
@@ -27,7 +28,7 @@ def resnet_eval(model: Any, device: str, eval_dataset_annotation_path: Path) -> 
         results: { 
             "inference_times": list[float],
             "ious": list[float],
-            "predictions": list[list[WSITile]],
+            "predictions": list[torch.Tensor],
             "indices": list[str]
         }
     """
@@ -40,26 +41,43 @@ def resnet_eval(model: Any, device: str, eval_dataset_annotation_path: Path) -> 
         transform=None,
     )
 
+    slide_dataset = COCODataset(
+        annotation_file="/storage01/bolma/dev/data/datasets/WSI-ROI/slides/l8/annotations.json",
+        train=False,
+        split_file=Path("/storage01/bolma/dev/tumor-region-detection-thesis/dataset_split.json"),
+        random_seed=42,
+        transform=None,
+    )
+
     # Create WSI tiles from COCO dataset with predictions
     tile_groups = create_wsi_tiles_from_coco_with_prediction(dataset, model, device)
     # Calculate IoU for each WSI
+
 
     iou_results = calculate_iou_for_tiles(tile_groups)
 
     # Extract average inference times from tile groups
     inference_times = get_inference_times(tile_groups)
 
-    metrics = {
-        "inference_times": inference_times,
-        "ious": iou_results
-    }
+    # Create a mask from the tiles
+    masks = {}
+    for wsi_name, tiles in tqdm(tile_groups.items(), desc="Creating masks from tile groups"):
+        # creating mask
+        mask = torch.from_numpy(mask_from_tiles(tiles))
+        # Convering masks to match the format of the two other methods
+        masks[wsi_name] = crop_mask(mask, wsi_name, slide_dataset)
 
-    results = {
-        "inference_times": [inference_time for inference_time in inference_times.values()],
-        "ious": [iou for iou in iou_results.values()],
-        "predictions": [tiles for tiles in tile_groups.values()],
-        "indices": [name for name in tile_groups.keys()]
-    }
+    results= {
+        "inference_times": [],
+        "ious": [],
+        "predictions": [],
+        "indices": []
+    } 
+    for key in tile_groups.keys():
+        results["indices"].append(key)
+        results["predictions"].append(masks[key])
+        results["ious"].append(iou_results[key])
+        results["inference_times"].append(inference_times[key])
 
     return results
 
@@ -148,10 +166,10 @@ def calculate_iou_for_tiles(
     """
     iou_results = {}
     
-    for wsi_source, tiles in wsi_groups.items():
+    for wsi_name, tiles in wsi_groups.items(): 
         # Create a WSI object from the tiles
-        wsi_source = Path("/storage01/bolma/dev/data/BIOMAG_slides/Lung") / (wsi_source[:wsi_source.rfind("HE")+2].upper().replace('-', '_') if wsi_source.rfind("HE") != -1 else wsi_source)
-        wsi = WSI(wsi_source)
+        wsi_path = Path("/storage01/bolma/dev/data/BIOMAG_slides/Lung") / (wsi_name[:wsi_name.rfind("HE")+2].upper().replace('-', '_') if wsi_name.rfind("HE") != -1 else wsi_name)
+        wsi = WSI(wsi_path)
 
         level_width = wsi.level_dimensions[tiles[0].level][0]
         level_height = wsi.level_dimensions[tiles[0].level][1]
@@ -177,7 +195,7 @@ def calculate_iou_for_tiles(
         union = np.logical_or(gt_bool, pred_bool).sum() 
         iou = intersection / union if union > 0 else 0.0
         
-        iou_results[wsi_source] = iou
+        iou_results[wsi_name] = iou
     
     return iou_results
 
@@ -205,6 +223,118 @@ def get_inference_times(tile_groups: Dict[str, List[WSITile]]) -> Dict[str, floa
         inference_times[wsi_name] = mean_inference_time
 
     return inference_times
+
+def mask_from_tiles(tiles: List[WSITile]) -> np.ndarray:
+    """
+    Create a mask from a list of WSITile objects.
+    
+    Args:
+        tiles: List of WSITile objects
+    
+    Returns:
+        Mask as a numpy array
+    """
+    
+    level_height = 0
+    level_width = 0
+    for tile in tiles:
+        if tile.y+tile.height > level_height:
+            level_height = tile.y+tile.height
+        if tile.x+tile.width > level_width:
+            level_width = tile.x+tile.width
+    
+    mask = np.zeros((level_height, level_width), dtype=np.uint8)
+    
+    for tile in tiles:
+        x, y, w, h = tile.x, tile.y, tile.width, tile.height
+        mask[y:y+h, x:x+w] = tile.class_id
+    
+    return mask
+
+def crop_mask(mask: torch.Tensor, wsi_name: str, dataset) -> torch.Tensor:
+    """
+    Crop the mask to match the dimensions of the masks of the other methods.
+
+    Args:
+        mask: Mask to be cropped (expected to be a binary tensor covering the full WSI area at source level)
+        wsi_name: Name of the WSI
+        dataset: Dataset containing the original images and their annotations
+    Returns:
+        Cropped mask aligned with the target image
+    """
+    # Get the crop offsets and target image dimensions
+    crop_offsets = None
+    target_level = None
+    target_width = None
+    target_height = None
+    
+    # Find the image metadata for this WSI
+    for image_id in dataset.image_ids:
+        img_info = dataset.coco.imgs[image_id]
+        if img_info.get('wsi_source') == f"{wsi_name}.mrxs":
+            crop_offsets = img_info.get('crop_offsets')
+            target_level = img_info.get('level')
+            target_width = img_info.get('width')
+            target_height = img_info.get('height')
+            break
+    
+    if crop_offsets is None or target_level is None:
+        raise ValueError(f"Could not find crop offsets or level for WSI {wsi_name}")
+
+    # Get source_level from the mask's original size
+    # Assuming the mask is at level 6 (based on your eval.py code mentions)
+    source_level = 6  # If this is different, adjust accordingly
+    
+    # Calculate the scaling factor between source and target level
+    # Each level is typically 2x the resolution of the next level
+    scale_factor = 2 ** (target_level - source_level)
+    
+    # Scale the mask to match target level's resolution
+    if scale_factor != 1:
+        # Resize the mask using interpolation
+        # Use nearest neighbor to maintain binary values
+        mask_height, mask_width = mask.shape
+        scaled_width = int(mask_width / scale_factor)
+        scaled_height = int(mask_height / scale_factor)
+        
+        # Reshape to [1, 1, H, W] for F.interpolate
+        mask_reshaped = mask.unsqueeze(0).unsqueeze(0).float()
+        
+        # Use nearest interpolation to maintain binary mask
+        scaled_mask = torch.nn.functional.interpolate(
+            mask_reshaped,
+            size=(scaled_height, scaled_width),
+            mode='nearest'
+        )
+        
+        # Back to original shape
+        scaled_mask = scaled_mask.squeeze(0).squeeze(0)
+    else:
+        scaled_mask = mask
+    
+    # Now crop the scaled mask using the crop offsets
+    x_start, y_start, x_end, y_end = crop_offsets
+    
+    # Make sure our scaled mask is large enough
+    if scaled_mask.shape[0] < y_end or scaled_mask.shape[1] < x_end:
+        # Pad if necessary
+        pad_height = max(0, y_end - scaled_mask.shape[0])
+        pad_width = max(0, x_end - scaled_mask.shape[1])
+        scaled_mask = torch.nn.functional.pad(scaled_mask, (0, pad_width, 0, pad_height))
+    
+    # Crop the mask
+    cropped_mask = scaled_mask[y_start:y_end, x_start:x_end]
+    
+    # Ensure the cropped mask matches the target dimensions
+    if cropped_mask.shape[0] != target_height or cropped_mask.shape[1] != target_width:
+        # Resize to match target dimensions exactly
+        cropped_mask = torch.nn.functional.interpolate(
+            cropped_mask.unsqueeze(0).unsqueeze(0).float(),
+            size=(target_height, target_width),
+            mode='nearest'
+        ).squeeze(0).squeeze(0)
+    
+    return cropped_mask
 
 # UNET
 
@@ -337,7 +467,15 @@ def maskrcnn_eval(model:Any, device:str, dataloader:torch.utils.data.DataLoader,
             """
             
             for prediction, target in zip(predictions, targets):
-                results["predictions"].append(prediction)
+                # combine masks
+                predicted_masks = prediction.get("masks")
+                combined_mask = torch.zeros_like(predicted_masks[0])
+                # Combine all masks
+                for mask in predicted_masks:
+                    combined_mask = torch.logical_or(combined_mask, mask)
+
+                results["predictions"].append(combined_mask)
+
                 # Metrics calculation
                 #iou_best = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold,method="best")
                 iou_combined = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold,method="combined")
