@@ -40,14 +40,22 @@ def calculate_pixel_iou_binary_classification(predictions, targets, confidence_t
         elif method == "combined":
             # Use one combined mask from all predictions
             pred_mask = torch.zeros_like(predicted_masks[0])
-            # Combine all masks
+            
+            # Combine masks using maximum value at each pixel
             for mask in predicted_masks:
-                pred_mask = torch.logical_or(pred_mask, mask)
+                pred_mask = torch.max(pred_mask, mask)
+            
+            # Threshold the COMBINED mask
+            pred_mask = (pred_mask > confidence_threshold).to(torch.uint8)
 
             target_mask = torch.zeros_like(target_masks[0])
-            # Combine all target masks
+
+            # Combine masks using maximum value at each pixel
             for mask in target_masks:
-                target_mask = torch.logical_or(target_mask, mask)
+                target_mask = torch.max(target_mask, mask)
+            
+            # Threshold the COMBINED target mask
+            target_mask = (target_mask > confidence_threshold).to(torch.uint8)
     else:
         # Use the first mask from predictions and targets
         pred_mask = predicted_masks[0]

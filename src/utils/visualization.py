@@ -8,7 +8,7 @@ from matplotlib.patches import Patch
 from typing import List, Dict
 from src.wsilib import WSITile, AnnotatedWSI, WSI
 
-def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_name_index_map:Dict, slide_dataset:torch.utils.data.Dataset, alpha:float=0.4):
+def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_name_index_map:Dict, slide_dataset:torch.utils.data.Dataset, alpha:float=0.4, save_dir:Path=Path("results")):
     """
     Visualizes the original image with overlayed masks from different methods.
 
@@ -18,6 +18,7 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
         wsi_folder (Path): The folder containing the WSI files.
         slide_dataset (Dataset): The dataset containing the images and their annotations.
         alpha (float): The transparency level for the overlayed masks. Default is 0.4.
+        save_dir (Path): The directory where the results will be saved. Default is "results".
 
     """
     
@@ -48,10 +49,6 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
 
         if name == wsi_name:
             # Get the image and its annotations
-            wsi = WSI(wsi_path)
-            level_size = wsi.level_dimensions
-            print(level_size)
-
             image, target = slide_dataset[idx]
             
             # Convert tensor to numpy for plotting
@@ -63,7 +60,20 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
                 
             # Get ground truth mask (binary)
             if 'masks' in target and len(target['masks']) > 0:
-                ground_truth_mask = target['masks'][0].cpu().numpy()
+                # If there are multiple ground truth masks, combine them
+                if len(target['masks']) > 1:
+                    # Initialize with zeros
+                    ground_truth_mask = torch.zeros_like(target['masks'][0])
+                    
+                    # Combine all ground truth masks
+                    for mask in target['masks']:
+                        ground_truth_mask = torch.max(ground_truth_mask, mask)
+                    
+                    # Convert to numpy for visualization
+                    ground_truth_mask = ground_truth_mask.cpu().numpy()
+                else:
+                    # Just use the single mask
+                    ground_truth_mask = target['masks'][0].cpu().numpy()
             break
     
     if original_image is None:
@@ -106,10 +116,6 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
             plt.plot(contour[:, 0, 0], contour[:, 0, 1], 'k-', linewidth=2)
         
         legend_elements.append(Patch(facecolor='black', edgecolor='black', label='Ground Truth', alpha=0.7))
-    
-    print(image.shape)
-    for method, mask in method_masks.items():
-        print(mask.shape)
 
     # Add prediction contours and semi-transparent masks
     for method, mask in method_masks.items():
@@ -120,14 +126,22 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
         if isinstance(mask, torch.Tensor):
             mask = mask.cpu().numpy()
 
-             # Handle different tensor shapes
-            if mask.ndim == 4:  # Shape: [1, 1, H, W]
-                mask = mask.squeeze(0).squeeze(0)
-            elif mask.ndim == 3:  # Shape: [1, H, W]
-                mask = mask.squeeze(0)
+        # Handle different tensor shapes
+        if mask.ndim == 4:  # Shape: [1, 1, H, W]
+            mask = mask.squeeze(0).squeeze(0)
+        elif mask.ndim == 3:  # Shape: [1, H, W]
+            mask = mask.squeeze(0)
         
         # Ensure binary
         binary_mask = (mask > 0.5).astype(np.uint8)
+        
+        # fix disconnected contours
+        if method == "Tile-based":
+            # Apply morphological closing
+            kernel = np.ones((3, 3), np.uint8)
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+        
+            #binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
         
         # Get color
         color = method_colors.get(method, (255, 0, 0))  # Default to red if not found
@@ -165,7 +179,6 @@ def visualize_masks(wsi_name:str, matched_results:Dict, wsi_folder:Path, wsi_nam
     plt.tight_layout()
     
     # Save figure
-    save_dir = Path('results/figures/mask_overlays')
     save_dir.mkdir(exist_ok=True, parents=True)
-    # plt.savefig(save_dir / f"{wsi_name}_mask_comparison.png", dpi=300, bbox_inches='tight')
+    plt.savefig(save_dir / f"{wsi_name}_results.png", dpi=300, bbox_inches='tight')
     plt.show()

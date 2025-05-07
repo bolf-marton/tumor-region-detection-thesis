@@ -53,12 +53,6 @@ def resnet_eval(model: Any, device: str, eval_dataset_annotation_path: Path) -> 
     tile_groups = create_wsi_tiles_from_coco_with_prediction(dataset, model, device)
     # Calculate IoU for each WSI
 
-
-    iou_results = calculate_iou_for_tiles(tile_groups)
-
-    # Extract average inference times from tile groups
-    inference_times = get_inference_times(tile_groups)
-
     # Create a mask from the tiles
     masks = {}
     for wsi_name, tiles in tqdm(tile_groups.items(), desc="Creating masks from tile groups"):
@@ -66,6 +60,11 @@ def resnet_eval(model: Any, device: str, eval_dataset_annotation_path: Path) -> 
         mask = torch.from_numpy(mask_from_tiles(tiles))
         # Convering masks to match the format of the two other methods
         masks[wsi_name] = crop_mask(mask, wsi_name, slide_dataset)
+
+    iou_results = calculate_iou_for_tiles(masks, slide_dataset)
+
+    # Extract average inference times from tile groups
+    inference_times = get_inference_times(tile_groups)
 
     results= {
         "inference_times": [],
@@ -153,51 +152,59 @@ def create_wsi_tiles_from_coco_with_prediction(
     return wsi_groups
 
 def calculate_iou_for_tiles(
-    wsi_groups: Dict[str, List[WSITile]],
+    masks: List[torch.Tensor],
+    dataset: COCODataset,
 ) -> Dict[str, float]:
     """
-    Calculate IoU for each WSI group.
+    Calculate IoU for each WSI.
     
     Args:
-        wsi_groups: Dictionary with WSI source names and list of WSITile objects
+        masks: Dictionary with WSI source names and their corresponding masks
+        dataset: COCODataset object containing the annotations
     
     Returns:
         Dictionary with WSI source names and their corresponding IoU values
     """
     iou_results = {}
-    
-    for wsi_name, tiles in wsi_groups.items(): 
-        # Create a WSI object from the tiles
-        wsi_path = Path("/storage01/bolma/dev/data/BIOMAG_slides/Lung") / (wsi_name[:wsi_name.rfind("HE")+2].upper().replace('-', '_') if wsi_name.rfind("HE") != -1 else wsi_name)
-        wsi = WSI(wsi_path)
+    for wsi_name, pred_mask in tqdm(masks.items(), desc="Calculating IoU"):
+        for image_id in dataset.image_ids:
+            img_info = dataset.coco.imgs[image_id]
+            if img_info.get('wsi_source') == wsi_name+".mrxs":
+                # get tartget mask
+                # Load annotations
+                ann_ids = dataset.coco.getAnnIds(imgIds=image_id)
+                annotations = dataset.coco.loadAnns(ann_ids)
 
-        level_width = wsi.level_dimensions[tiles[0].level][0]
-        level_height = wsi.level_dimensions[tiles[0].level][1]
-        
-        # Calculate IoU
-        gt_mask = np.zeros((level_height, level_width), dtype=np.uint8)
-        pred_mask = np.zeros((level_height, level_width), dtype=np.uint8)
-        
-        # Add ground truth to mask
-        for tile in tiles:
-            x, y, w, h = tile.x, tile.y, tile.width, tile.height
-            gt_mask[y:y+h, x:x+w] = tile.class_id
-        
-        # Add prediction to mask
-        for tile in tiles:
-            x, y, w, h = tile.x, tile.y, tile.width, tile.height
-            pred_mask[y:y+h, x:x+w] = tile.metadata["predicted_class"]
+                gt_masks = []
+                for ann in annotations:
+                    # Get mask
+                    if "segmentation" in ann.keys() and ann["segmentation"]:
+                        mask = dataset.coco.annToMask(ann)
+                        gt_masks.append(mask)
+                
+                gt_masks_tensor = torch.as_tensor(gt_masks, dtype=torch.uint8)
 
-        gt_bool = gt_mask > 0
-        pred_bool = pred_mask > 0
+                target_mask = torch.zeros_like(gt_masks_tensor[0])
 
-        intersection = np.logical_and(gt_bool, pred_bool).sum()
-        union = np.logical_or(gt_bool, pred_bool).sum() 
-        iou = intersection / union if union > 0 else 0.0
-        
-        iou_results[wsi_name] = iou
-    
+                # Combine masks using maximum value at each pixel
+                for mask in gt_masks_tensor:
+                    target_mask = torch.max(target_mask, mask)
+
+                target_mask = (target_mask > 0.5).to(torch.uint8)
+
+                # Calculate intersection and union
+                intersection = torch.logical_and(pred_mask, target_mask).sum().item()
+                union = torch.logical_or(pred_mask, target_mask).sum().item()
+
+                # Calculate IoU
+                iou = intersection / union if union != 0 else 0.0
+
+                iou_results[wsi_name] = iou
+
     return iou_results
+    
+
+                
 
 def get_inference_times(tile_groups: Dict[str, List[WSITile]]) -> Dict[str, float]:
     """
@@ -469,12 +476,21 @@ def maskrcnn_eval(model:Any, device:str, dataloader:torch.utils.data.DataLoader,
             for prediction, target in zip(predictions, targets):
                 # combine masks
                 predicted_masks = prediction.get("masks")
-                combined_mask = torch.zeros_like(predicted_masks[0])
-                # Combine all masks
-                for mask in predicted_masks:
-                    combined_mask = torch.logical_or(combined_mask, mask)
-
-                results["predictions"].append(combined_mask)
+                if len(predicted_masks) > 0:
+                    # Initialize with zeros
+                    combined_mask = torch.zeros_like(predicted_masks[0])
+                    
+                    # Combine masks using maximum value at each pixel
+                    for mask in predicted_masks:
+                        combined_mask = torch.max(combined_mask, mask)
+                    
+                    binary_mask = (combined_mask > confidence_threshold).to(torch.uint8)
+                    results["predictions"].append(binary_mask)
+                else:
+                    # Create empty mask with right dimensions if no predictions
+                    empty_mask = torch.zeros((1, target['masks'].shape[1], target['masks'].shape[2]), 
+                                            device=device)
+                    results["predictions"].append(empty_mask)
 
                 # Metrics calculation
                 #iou_best = calculate_pixel_iou_binary_classification(prediction, target, confidence_threshold,method="best")
