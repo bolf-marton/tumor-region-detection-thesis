@@ -1,31 +1,8 @@
 # Project Name
 
-Brief description of your project goes here.
+Benchmarking of Neural Networks for Tumor Detection on Whole Slide Images
 
-## Installation
+# Description
+This repository stores the implementations and results of my thesis.
 
-```bash
-# Create a virtual environment
-python -m venv venv
-
-# Activate the virtual environment
-# On Windows:
-venv\Scripts\activate
-# On Unix or MacOS:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Usage
-
-Describe how to use your project here.
-
-## Contributing
-
-Instructions for how to contribute to your project.
-
-## License
-
-Add your license information here.
+The main parts are present in the notebooks at the root of the projects. Additional codes are placed at the /src/ folder.
